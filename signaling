@@ -1,0 +1,97 @@
+// signaling.js — Firebase-only signaling layer
+// Simple, stable, CSP-safe, mobile-friendly
+
+export class Signaling {
+    constructor() {
+        this.roomId = null;
+        this.handlers = {
+            connected: () => {},
+            message: () => {},
+            disconnected: () => {}
+        };
+
+        this.db = firebase.database();
+        this.isConnected = false;
+    }
+
+    // Event bindings
+    onConnected(fn)    { this.handlers.connected = fn; }
+    onMessage(fn)      { this.handlers.message = fn; }
+    onDisconnected(fn) { this.handlers.disconnected = fn; }
+
+    // --------------------------------------------------------------
+    // HOST CREATES ROOM
+    // --------------------------------------------------------------
+    async createRoom(roomId) {
+        this.roomId = roomId;
+
+        // initialize room state in DB
+        await this.db.ref(`rooms/${roomId}`).set({
+            connected: false,
+            lastUpdate: Date.now()
+        });
+
+        // listen for guest join
+        this.db.ref(`rooms/${roomId}/connected`).on("value", (snap) => {
+            if (snap.val() === true && !this.isConnected) {
+                this.isConnected = true;
+                this.handlers.connected();
+            }
+        });
+
+        // listen for messages
+        this.db.ref(`rooms/${roomId}/messages`).on("child_added", (snap) => {
+            const data = snap.val();
+            if (data && data.sender !== "host") {
+                this.handlers.message(data.payload);
+            }
+        });
+    }
+
+    // --------------------------------------------------------------
+    // GUEST JOINS ROOM
+    // --------------------------------------------------------------
+    async joinRoom(roomId) {
+        this.roomId = roomId;
+
+        // mark connection
+        await this.db.ref(`rooms/${roomId}/connected`).set(true);
+
+        this.isConnected = true;
+        this.handlers.connected();
+
+        // listen for host messages
+        this.db.ref(`rooms/${roomId}/messages`).on("child_added", (snap) => {
+            const data = snap.val();
+            if (data && data.sender !== "guest") {
+                this.handlers.message(data.payload);
+            }
+        });
+    }
+
+    // --------------------------------------------------------------
+    // SEND MESSAGE
+    // --------------------------------------------------------------
+    async send(obj) {
+        if (!this.roomId) return;
+
+        await this.db.ref(`rooms/${this.roomId}/messages`).push({
+            sender: this.isConnected ? "guest" : "host",   // auto-chooses
+            payload: obj,
+            time: Date.now()
+        });
+    }
+
+    // --------------------------------------------------------------
+    // CLOSE CONNECTION
+    // --------------------------------------------------------------
+    async close() {
+        if (this.roomId) {
+            try {
+                await this.db.ref(`rooms/${this.roomId}/connected`).set(false);
+            } catch (e) {}
+        }
+
+        this.handlers.disconnected();
+    }
+}
